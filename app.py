@@ -37,19 +37,31 @@ def _load_env():
                         os.environ[k] = v
         except Exception:
             pass
-
+    
 def _static_base():
     base = os.path.join(os.path.dirname(__file__), 'static')
     if hasattr(sys, '_MEIPASS'):
         base = os.path.join(sys._MEIPASS, 'static')
     return base
 
+def _get_mongo_client():
+    uri = os.environ.get('MONGO_URI')
+    if uri:
+        try:
+            c = MongoClient(uri, serverSelectionTimeoutMS=3000)
+            c.admin.command('ping')
+            return c
+        except Exception:
+            pass
+    local_uri = os.environ.get('MONGO_LOCAL_URI', 'mongodb://localhost:27017')
+    return MongoClient(local_uri)
+
 app = Flask(__name__, static_folder=_static_base())
 CORS(app)
 _load_env()
-MONGO_URI = os.environ.get('MONGO_URI')
-client = MongoClient(MONGO_URI) if MONGO_URI else MongoClient('mongodb://localhost:27017')
-mdb = client['tasklist']
+client = _get_mongo_client()
+db_name = os.environ.get('MONGO_DB', 'tasklist')
+mdb = client[db_name]
 tasklists_col = mdb['tasklists']
 columns_col = mdb['columns']
 tasks_col = mdb['tasks']
