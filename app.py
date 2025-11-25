@@ -9,7 +9,12 @@ try:
     import tkinter as tk
 except Exception:
     tk = None
+try:
+    from PySide6 import QtWidgets, QtCore, QtGui
+except Exception:
+    QtWidgets = None
 from flask_cors import CORS
+import config
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 import os
@@ -45,7 +50,7 @@ def _static_base():
     return base
 
 def _get_mongo_client():
-    uri = os.environ.get('MONGO_URI')
+    uri = getattr(config, 'MONGO_URI', None)
     if uri:
         try:
             c = MongoClient(uri, serverSelectionTimeoutMS=3000)
@@ -53,14 +58,13 @@ def _get_mongo_client():
             return c
         except Exception:
             pass
-    local_uri = os.environ.get('MONGO_LOCAL_URI', 'mongodb://localhost:27017')
+    local_uri = getattr(config, 'MONGO_LOCAL_URI', 'mongodb://localhost:27017')
     return MongoClient(local_uri)
 
 app = Flask(__name__, static_folder=_static_base())
 CORS(app)
-_load_env()
 client = _get_mongo_client()
-db_name = os.environ.get('MONGO_DB', 'tasklist')
+db_name = getattr(config, 'MONGO_DB', 'tasklist')
 mdb = client[db_name]
 tasklists_col = mdb['tasklists']
 columns_col = mdb['columns']
@@ -149,8 +153,6 @@ def get_logo_data_url():
 # Database Models
 if tasklists_col.count_documents({}) == 0:
     tasklists_col.insert_one({'id': 1, 'title': 'TaskList 1', 'created_at': datetime.utcnow()})
-ensure_logo()
-ensure_ico()
 
 # API Routes for Columns
 @app.route('/api/columns', methods=['GET'])
@@ -1320,82 +1322,284 @@ def index():
     return HTML_TEMPLATE.replace('__LOGO_URL__', logo_url)
 
 def _run_server():
-    app.run(debug=False, host='127.0.0.1', port=5000, use_reloader=False)
+    pass
+
+def qt_ui_main():
+    if QtWidgets is None:
+        return False
+    class TaskWidget(QtWidgets.QWidget):
+        toggled = QtCore.Signal(int)
+        deleted = QtCore.Signal(int)
+        def __init__(self, task, parent=None):
+            super().__init__(parent)
+            self.task = task
+            hb = QtWidgets.QHBoxLayout(self)
+            self.cb = QtWidgets.QCheckBox()
+            self.cb.setChecked(bool(task.get('completed', False)))
+            self.cb.stateChanged.connect(self.on_toggle)
+            self.title = QtWidgets.QLabel(task.get('title',''))
+            btn = QtWidgets.QPushButton('Xóa')
+            btn.setStyleSheet('background:#f44336;color:#fff;border:none;padding:4px 8px;')
+            btn.clicked.connect(self.on_delete)
+            hb.addWidget(self.cb)
+            hb.addWidget(self.title)
+            hb.addStretch(1)
+            hb.addWidget(btn)
+        def on_toggle(self, _):
+            self.toggled.emit(self.task['id'])
+        def on_delete(self):
+            self.deleted.emit(self.task['id'])
+    class ColumnWidget(QtWidgets.QGroupBox):
+        add_task = QtCore.Signal(int)
+        delete_column = QtCore.Signal(int)
+        refresh = QtCore.Signal()
+        def __init__(self, column, tasks, parent=None):
+            super().__init__(parent)
+            self.column = column
+            self.setTitle(column.get('title',''))
+            v = QtWidgets.QVBoxLayout(self)
+            hv = QtWidgets.QHBoxLayout()
+            btn_add = QtWidgets.QPushButton('Thêm')
+            btn_add.setStyleSheet('background:#4CAF50;color:#fff;border:none;padding:4px 8px;')
+            btn_add.clicked.connect(lambda: self.add_task.emit(column['id']))
+            btn_del = QtWidgets.QPushButton('Xóa cột')
+            btn_del.setStyleSheet('background:#f44336;color:#fff;border:none;padding:4px 8px;')
+            btn_del.clicked.connect(lambda: self.delete_column.emit(column['id']))
+            hv.addWidget(btn_add)
+            hv.addWidget(btn_del)
+            hv.addStretch(1)
+            v.addLayout(hv)
+            comp = sum(1 for t in tasks if t.get('completed', False))
+            total = len(tasks)
+            percent = int(round((comp/total)*100)) if total else 0
+            bar = QtWidgets.QProgressBar()
+            bar.setRange(0,100)
+            bar.setValue(percent)
+            v.addWidget(bar)
+            lbl = QtWidgets.QLabel(f"{comp}/{total}   {percent}%")
+            lbl.setAlignment(QtCore.Qt.AlignRight)
+            v.addWidget(lbl)
+            for t in tasks:
+                tw = TaskWidget(t)
+                tw.toggled.connect(self.on_toggle)
+                tw.deleted.connect(self.on_delete)
+                v.addWidget(tw)
+            v.addStretch(1)
+        def on_toggle(self, tid):
+            tasks_col.update_one({'id': tid}, {'$set': {'completed': not tasks_col.find_one({'id': tid}).get('completed', False), 'updated_at': datetime.utcnow()}})
+            self.refresh.emit()
+        def on_delete(self, tid):
+            tasks_col.delete_one({'id': tid})
+            self.refresh.emit()
+    class Main(QtWidgets.QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.setWindowTitle('TaskList')
+            self.resize(1200,800)
+            try:
+                import base64 as _b64
+                icon_data = getattr(__import__('config'), 'APP_ICON', None)
+                logo_data = getattr(__import__('config'), 'LOGO', None)
+                if icon_data:
+                    pix = QtGui.QPixmap()
+                    if pix.loadFromData(_b64.b64decode(icon_data)):
+                        ic = QtGui.QIcon(pix)
+                        self.setWindowIcon(ic)
+                elif logo_data:
+                    pix = QtGui.QPixmap()
+                    if pix.loadFromData(_b64.b64decode(logo_data)):
+                        self.setWindowIcon(QtGui.QIcon(pix))
+            except Exception:
+                pass
+            cen = QtWidgets.QWidget()
+            self.setCentralWidget(cen)
+            v = QtWidgets.QVBoxLayout(cen)
+            self.banner = QtWidgets.QLabel('TaskList')
+            self.banner.setAlignment(QtCore.Qt.AlignCenter)
+            self.banner.setStyleSheet('background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #667eea, stop:1 #764ba2); color:#fff; font-size:24px; font-weight:bold; padding:18px;')
+            v.addWidget(self.banner)
+            h = QtWidgets.QHBoxLayout()
+            v.addLayout(h,1)
+            left = QtWidgets.QWidget()
+            left.setStyleSheet('background:#1f2937; color:#e5e7eb;')
+            left.setMinimumWidth(280)
+            lv = QtWidgets.QVBoxLayout(left)
+            lhdr = QtWidgets.QHBoxLayout()
+            title = QtWidgets.QLabel('Danh sách')
+            title.setStyleSheet('color:#fff; font-weight:700;')
+            self.btn_add_list = QtWidgets.QPushButton('+')
+            self.btn_add_list.setStyleSheet('background:#2563eb;color:#fff;')
+            lhdr.addWidget(title)
+            lhdr.addStretch(1)
+            lhdr.addWidget(self.btn_add_list)
+            lv.addLayout(lhdr)
+            self.lists = QtWidgets.QListWidget()
+            self.lists.setStyleSheet('background:#374151; color:#e5e7eb;')
+            lv.addWidget(self.lists,1)
+            la = QtWidgets.QHBoxLayout()
+            self.btn_rename = QtWidgets.QPushButton('Sửa')
+            self.btn_delete = QtWidgets.QPushButton('Xóa')
+            self.btn_rename.setStyleSheet('background:#374151;color:#e5e7eb;')
+            self.btn_delete.setStyleSheet('background:#f44336;color:#fff;')
+            la.addWidget(self.btn_rename)
+            la.addWidget(self.btn_delete)
+            lv.addLayout(la)
+            self.board_scroll = QtWidgets.QScrollArea()
+            self.board_scroll.setWidgetResizable(True)
+            board = QtWidgets.QWidget()
+            self.board = board
+            self.board_layout = QtWidgets.QHBoxLayout(board)
+            self.board_layout.addStretch(1)
+            self.board_scroll.setWidget(board)
+            h.addWidget(left)
+            h.addWidget(self.board_scroll,1)
+            tb = QtWidgets.QHBoxLayout()
+            self.btn_add_column = QtWidgets.QPushButton('Thêm cột')
+            self.btn_add_column.setStyleSheet('background:#4CAF50;color:#fff;')
+            tb.addStretch(1)
+            tb.addWidget(self.btn_add_column)
+            v.addLayout(tb)
+            self.current_list_id = None
+            self.btn_add_list.clicked.connect(self.add_list)
+            self.btn_rename.clicked.connect(self.rename_list)
+            self.btn_delete.clicked.connect(self.delete_list)
+            self.btn_add_column.clicked.connect(self.add_column)
+            self.lists.itemSelectionChanged.connect(self.on_select_list)
+            self.reload_lists()
+        def reload_lists(self):
+            self.lists.clear()
+            ls = list(tasklists_col.find({}).sort('created_at', 1))
+            for l in ls:
+                it = QtWidgets.QListWidgetItem(f"{l['id']}|{l.get('title','')}")
+                self.lists.addItem(it)
+            if ls:
+                if self.current_list_id is None:
+                    self.current_list_id = ls[0]['id']
+                for i,l in enumerate(ls):
+                    if l['id'] == self.current_list_id:
+                        self.lists.setCurrentRow(i)
+                        break
+            self.reload_board()
+        def on_select_list(self):
+            it = self.lists.currentItem()
+            if not it:
+                return
+            try:
+                self.current_list_id = int(it.text().split('|',1)[0])
+            except Exception:
+                self.current_list_id = None
+            self.reload_board()
+        def reload_board(self):
+            for i in reversed(range(self.board_layout.count()-1)):
+                w = self.board_layout.itemAt(i).widget()
+                if w:
+                    w.setParent(None)
+            if not self.current_list_id:
+                return
+            cols = list(columns_col.find({'task_list_id': self.current_list_id}).sort('position', 1))
+            for c in cols:
+                ts = list(tasks_col.find({'column_id': c['id']}).sort([('completed', 1), ('position', 1)]))
+                cw = ColumnWidget(c, ts)
+                cw.add_task.connect(self.add_task)
+                cw.delete_column.connect(self.delete_column)
+                cw.refresh.connect(self.reload_board)
+                self.board_layout.insertWidget(self.board_layout.count()-1, cw)
+        def add_list(self):
+            title, ok = QtWidgets.QInputDialog.getText(self, 'Danh sách', 'Tên danh sách:')
+            if not ok or not title:
+                return
+            new_id = next_id(tasklists_col)
+            doc = {'id': new_id, 'title': title, 'created_at': datetime.utcnow()}
+            tasklists_col.insert_one(doc)
+            self.current_list_id = new_id
+            self.reload_lists()
+        def rename_list(self):
+            it = self.lists.currentItem()
+            if not it:
+                return
+            lid = int(it.text().split('|',1)[0])
+            title, ok = QtWidgets.QInputDialog.getText(self, 'Sửa', 'Tên danh sách:')
+            if not ok or not title:
+                return
+            tasklists_col.update_one({'id': lid}, {'$set': {'title': title}})
+            self.reload_lists()
+        def delete_list(self):
+            it = self.lists.currentItem()
+            if not it:
+                return
+            lid = int(it.text().split('|',1)[0])
+            m = QtWidgets.QMessageBox.question(self, 'Xác nhận', 'Xóa danh sách này?')
+            if m != QtWidgets.QMessageBox.Yes:
+                return
+            col_ids = [c['id'] for c in columns_col.find({'task_list_id': lid})]
+            tasks_col.delete_many({'column_id': {'$in': col_ids}})
+            columns_col.delete_many({'task_list_id': lid})
+            tasklists_col.delete_one({'id': lid})
+            self.current_list_id = None
+            self.reload_lists()
+        def add_column(self):
+            if not self.current_list_id:
+                return
+            title, ok = QtWidgets.QInputDialog.getText(self, 'Cột', 'Tiêu đề cột:')
+            if not ok or not title:
+                return
+            last = columns_col.find_one({'task_list_id': self.current_list_id}, sort=[('position', -1)])
+            pos = (last['position'] + 1) if last else 1
+            new_id = next_id(columns_col)
+            doc = {'id': new_id, 'title': title, 'position': pos, 'created_at': datetime.utcnow(), 'task_list_id': self.current_list_id}
+            columns_col.insert_one(doc)
+            self.reload_board()
+        def add_task(self, cid):
+            title, ok = QtWidgets.QInputDialog.getText(self, 'Công việc', 'Tiêu đề công việc:')
+            if not ok:
+                return
+            desc, ok2 = QtWidgets.QInputDialog.getText(self, 'Công việc', 'Mô tả:')
+            if not ok2:
+                return
+            last = tasks_col.find_one({'column_id': cid}, sort=[('position', -1)])
+            pos = (last['position'] + 1) if last else 1
+            new_id = next_id(tasks_col)
+            now = datetime.utcnow()
+            doc = {'id': new_id, 'title': title or 'New Task', 'description': desc or '', 'completed': False, 'position': pos, 'column_id': cid, 'created_at': now, 'updated_at': now}
+            tasks_col.insert_one(doc)
+            self.reload_board()
+        def delete_column(self, cid):
+            m = QtWidgets.QMessageBox.question(self, 'Xác nhận', 'Xóa cột này?')
+            if m != QtWidgets.QMessageBox.Yes:
+                return
+            tasks_col.delete_many({'column_id': cid})
+            columns_col.delete_one({'id': cid})
+            self.reload_board()
+    appq = QtWidgets.QApplication(sys.argv)
+    try:
+        import base64 as _b64
+        icon_data = getattr(__import__('config'), 'APP_ICON', None)
+        if icon_data:
+            p = QtGui.QPixmap()
+            if p.loadFromData(_b64.b64decode(icon_data)):
+                appq.setWindowIcon(QtGui.QIcon(p))
+    except Exception:
+        pass
+    w = Main()
+    w.show()
+    appq.exec()
+    return True
 
 if __name__ == '__main__':
-    if webview is None:
-        app.run(debug=True, host='0.0.0.0', port=5000)
-    else:
-        t = threading.Thread(target=_run_server, daemon=True)
-        t.start()
-        if tk is not None:
-            root = tk.Tk()
-            root.withdraw()
-            splash = tk.Toplevel(root)
-            splash.overrideredirect(True)
-            cv = tk.Canvas(splash, highlightthickness=0)
-            cv.pack(fill=tk.BOTH, expand=True)
-            sw, sh = 420, 220
-            x = (splash.winfo_screenwidth() - sw) // 2
-            y = (splash.winfo_screenheight() - sh) // 3
-            splash.geometry(f"{sw}x{sh}+{x}+{y}")
-            def hex_to_rgb(h):
-                return tuple(int(h[i:i+2], 16) for i in (1, 3, 5))
-            def rgb_to_hex(rgb):
-                return "#%02x%02x%02x" % rgb
-            def draw_gradient(canvas, w, h, colors):
-                canvas.delete("gradient")
-                step = 2
-                seg = max(len(colors) - 1, 1)
-                for y0 in range(0, h, step):
-                    pos = y0 / h
-                    idx = min(int(pos * seg), seg - 1)
-                    s0 = idx / seg
-                    s1 = (idx + 1) / seg
-                    t2 = (pos - s0) / (s1 - s0) if s1 > s0 else 0
-                    c0 = hex_to_rgb(colors[idx])
-                    c1 = hex_to_rgb(colors[idx + 1])
-                    r = int(c0[0] * (1 - t2) + c1[0] * t2)
-                    g = int(c0[1] * (1 - t2) + c1[1] * t2)
-                    b = int(c0[2] * (1 - t2) + c1[2] * t2)
-                    canvas.create_rectangle(0, y0, w, y0 + step, outline="", fill=rgb_to_hex((r, g, b)), tags="gradient")
-            draw_gradient(cv, sw, sh, ["#0f2027", "#203a43", "#2c5364"]) 
-            logo_img = None
-            lp = os.path.join(app.static_folder, 'logo.png')
-            if os.path.exists(lp):
-                try:
-                    raw = tk.PhotoImage(file=lp)
-                    f = max(1, raw.height() // 96)
-                    logo_img = raw.subsample(f, f)
-                    cv.create_image(sw // 2, sh // 2 - 20, image=logo_img)
-                except Exception:
-                    pass
-            cv.create_text(sw // 2, sh // 2 + 60, text="Đang tải dữ liệu...", font=("Segoe UI", 12), fill="#ffffff")
-            ready = {"ok": False}
-            def worker():
-                start = time.time()
-                min_ms = 1.5
-                while time.time() - start < 10:
-                    try:
-                        with urlopen('http://127.0.0.1:5000/api/tasklists', timeout=2) as r:
-                            if r.status == 200:
-                                break
-                    except Exception:
-                        time.sleep(0.2)
-                elapsed = time.time() - start
-                if elapsed < min_ms:
-                    time.sleep(min_ms - elapsed)
-                ready["ok"] = True
-                try:
-                    splash.destroy()
-                except Exception:
-                    pass
-                root.quit()
-            threading.Thread(target=worker, daemon=True).start()
-            root.mainloop()
-        icon_path = os.path.join(app.static_folder, 'app.ico')
+    ran = qt_ui_main()
+    if not ran:
         try:
-            webview.create_window('TaskList', 'http://127.0.0.1:5000/?nativeSplash=1', width=1200, height=800, icon=icon_path)
+            import tkinter as tk
+            def python_ui_main():
+                root = tk.Tk()
+                root.title('TaskList')
+                try:
+                    logo_img = tk.PhotoImage(data=getattr(__import__('config'), 'LOGO', ''))
+                    root.iconphoto(True, logo_img)
+                except Exception:
+                    pass
+                tk.Label(root, text='PySide6 chưa sẵn sàng, đang dùng UI cơ bản', font=('Segoe UI', 12)).pack(padx=20, pady=20)
+                root.mainloop()
+            python_ui_main()
         except Exception:
-            webview.create_window('TaskList', 'http://127.0.0.1:5000/?nativeSplash=1', width=1200, height=800)
-        webview.start()
+            pass
